@@ -145,13 +145,22 @@ class Player:
 
     def drop(self, opponent):
         self.piece['y'] += 1
+        self.score += 1  # +1 point for gravity or manual drop
         if check_collision(self.grid, self.piece):
             self.piece['y'] -= 1
             if self.piece['y'] <= 0:
                 self.game_over = True
             else:
                 lock_piece(self.grid, self.piece)
-                self.score += clear_lines(self.grid, opponent)
+                cleared = clear_lines(self.grid, opponent)
+                if cleared == 1:
+                    self.score += 100
+                elif cleared == 2:
+                    self.score += 300
+                elif cleared == 3:
+                    self.score += 500
+                elif cleared == 4:
+                    self.score += 800
                 self.spawn()
 
 def draw_text(text, center_x, center_y, size=48, colour=(255,255,255)):
@@ -189,15 +198,48 @@ def select_game_time():
                 return options[event.key]
 
 def game_loop():
-    game_duration = select_game_time()
     clock = pygame.time.Clock()
+
+    # === Instruction screen before the game starts ===
+    selected_time = None
+    while selected_time is None:
+        screen.fill((10, 10, 10))
+        draw_text("2-Player Tetris", screen.get_width()//2, 40, size=36)
+        draw_text("Press 1–5 to select game time", screen.get_width()//2, 90, size=24)
+        draw_text("1 = 30s   2 = 60s   3 = 90s   4 = 120s   5 = 180s", screen.get_width()//2, 120, size=20)
+
+        draw_text("Player 1: A = Left, D = Right, W = Rotate, S = Drop", screen.get_width()//2, 170, size=20)
+        draw_text("Player 2: ← = Left, → = Right, ↑ = Rotate, ↓ = Drop", screen.get_width()//2, 200, size=20)
+
+        draw_text("Rules:", screen.get_width()//2, 250, size=24)
+        draw_text("- Clear 2+ lines to send garbage to your opponent", screen.get_width()//2, 280, size=18)
+        draw_text("- Score: 100 (1 line), 300 (2), 500 (3), 800 (4)", screen.get_width()//2, 305, size=18)
+        draw_text("- +1 point per block dropped", screen.get_width()//2, 330, size=18)
+        draw_text("- Highest score at end wins", screen.get_width()//2, 355, size=18)
+
+        draw_text("Press 1 to 5 to begin", screen.get_width()//2, screen.get_height() - 40, size=24)
+        pygame.display.flip()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); exit()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_1: selected_time = 30
+                elif event.key == pygame.K_2: selected_time = 60
+                elif event.key == pygame.K_3: selected_time = 90
+                elif event.key == pygame.K_4: selected_time = 120
+                elif event.key == pygame.K_5: selected_time = 180
+
+    # === Game setup starts here ===
     p1 = Player(0)
     p2 = Player(WIDTH + GAP)
     start_time = time.time()
     game_over = False
     last_gravity_time = pygame.time.get_ticks()
+    game_duration = selected_time
 
     countdown(3)
+
 
     while True:
         screen.fill((20, 20, 20))
