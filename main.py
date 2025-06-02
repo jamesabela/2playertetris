@@ -1,336 +1,259 @@
+import pygame
 import random
-from dataclasses import dataclass, replace
-import tkinter
+import time
 
+pygame.init()
+
+# === Config ===
+BLOCK_SIZE = 30
+COLS = 10
+ROWS = 20
+WIDTH = BLOCK_SIZE * COLS
+HEIGHT = BLOCK_SIZE * ROWS
+GAP = 60
+EXTRA_HEIGHT = 80
+FPS = 5
+GRAVITY_DELAY = 1000  # milliseconds
+
+screen = pygame.display.set_mode((WIDTH * 2 + GAP, HEIGHT + EXTRA_HEIGHT))
+pygame.display.set_caption("2 Player Tetris")
+font = pygame.font.SysFont("Arial", 28)
 
 shapes = {
-    # See README.md for format.
-    'O': ['56a9', '6a95', 'a956', '956a'],
-    'I': ['4567', '26ae', 'ba98', 'd951'],
-    'J': ['0456', '2159', 'a654', '8951'],
-    'L': ['2654', 'a951', '8456', '0159'],
-    'T': ['1456', '6159', '9654', '4951'],
-    'Z': ['0156', '2659', 'a954', '8451'],
-    'S': ['1254', 'a651', '8956', '0459'],
+    'O': [[1, 1], [1, 1]],
+    'I': [[1, 1, 1, 1]],
+    'S': [[0, 1, 1], [1, 1, 0]],
+    'Z': [[1, 1, 0], [0, 1, 1]],
+    'L': [[1, 0, 0], [1, 1, 1]],
+    'J': [[0, 0, 1], [1, 1, 1]],
+    'T': [[0, 1, 0], [1, 1, 1]],
 }
 
+colors = {
+    'O': (255, 255, 0),
+    'I': (0, 255, 255),
+    'S': (0, 255, 0),
+    'Z': (255, 0, 0),
+    'L': (255, 165, 0),
+    'J': (0, 0, 255),
+    'T': (160, 32, 240),
+    'X': (100, 100, 100),
+}
 
-@dataclass(frozen=True)
-class Piece:
-    shape: str
-    rot: int = 0
-    x: int = 0
-    y: int = 0
+def random_piece():
+    type_ = random.choice(list(shapes.keys()))
+    return {'type': type_, 'shape': shapes[type_], 'x': 3, 'y': 0}
+
+def create_grid():
+    return [[''] * COLS for _ in range(ROWS)]
+
+def draw_grid(grid, offset_x):
+    for y in range(ROWS):
+        for x in range(COLS):
+            color = colors.get(grid[y][x], (30, 30, 30))
+            pygame.draw.rect(screen, color,
+                (x * BLOCK_SIZE + offset_x, y * BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE))
+            pygame.draw.rect(screen, (0, 0, 0),
+                (x * BLOCK_SIZE + offset_x, y * BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE), 1)
+
+def draw_piece(piece, offset_x):
+    for y, row in enumerate(piece['shape']):
+        for x, cell in enumerate(row):
+            if cell:
+                pygame.draw.rect(screen, colors[piece['type']],
+                    ((piece['x'] + x) * BLOCK_SIZE + offset_x, (piece['y'] + y) * BLOCK_SIZE,
+                     BLOCK_SIZE, BLOCK_SIZE))
+                pygame.draw.rect(screen, (0, 0, 0),
+                    ((piece['x'] + x) * BLOCK_SIZE + offset_x, (piece['y'] + y) * BLOCK_SIZE,
+                     BLOCK_SIZE, BLOCK_SIZE), 1)
+
+def check_collision(grid, piece):
+    for y, row in enumerate(piece['shape']):
+        for x, cell in enumerate(row):
+            if cell:
+                px = piece['x'] + x
+                py = piece['y'] + y
+                if px < 0 or px >= COLS or py >= ROWS or (py >= 0 and grid[py][px]):
+                    return True
+    return False
+
+def lock_piece(grid, piece):
+    for y, row in enumerate(piece['shape']):
+        for x, cell in enumerate(row):
+            if cell:
+                py = piece['y'] + y
+                px = piece['x'] + x
+                if 0 <= py < ROWS and 0 <= px < COLS:
+                    grid[py][px] = piece['type']
+
+def rotate(piece):
+    piece['shape'] = [list(row) for row in zip(*piece['shape'][::-1])]
+
+def add_garbage_lines(grid, count):
+    for _ in range(count):
+        grid.pop(0)
+        hole = random.randint(0, COLS - 1)
+        row = ['X' if i != hole else '' for i in range(COLS)]
+        grid.append(row)
+
+def clear_lines(grid, opponent):
+    new_grid = []
+    cleared = 0
+    for row in grid:
+        if all(cell != '' for cell in row):
+            cleared += 1
+        else:
+            new_grid.append(row)
+    while len(new_grid) < ROWS:
+        new_grid.insert(0, [''] * COLS)
+    for y in range(ROWS):
+        grid[y] = new_grid[y]
+
+    if cleared >= 2:
+        add_garbage_lines(opponent.grid, cleared)
+    return cleared
 
 
-def get_piece_blocks(piece):
-    for char in shapes[piece.shape][piece.rot % 4]:
-        y, x = divmod(int(char, 16), 4)
-        yield piece.x + x, piece.y - y
-
-
-def move_piece(piece, *, rot=0, dx=0, dy=0):
-    rot = (piece.rot + rot) % 4
-    x = piece.x + dx
-    y = piece.y + dy
-    return replace(piece, rot=rot, x=x, y=y)
-
-
-def get_wall_kicks(piece, *, rot=0):
-    return [
-        move_piece(piece, rot=rot, dx=dx, dy=dy)
-        for dx, dy in [(0, 0), (-1, 0), (1, 0), (0, -1)]
-    ]
-
-
-def piece_fits(field, piece):
-    width = len(field[0])
-    height = len(field)
-
-    for x, y in get_piece_blocks(piece):
-        if not 0 <= x < width:
-            return False
-        elif not 0 <= y < height:
-            return False
-        elif field[y][x]:
-            return False
-    else:
-        return True
-
-
-def random_shape_bag():
-    bag = list(shapes)
-
-    # Start with an easy piece.
-    yield random.choice('IJLT')
-
-    while True:
-        random.shuffle(bag)
-        yield from bag
-
-
-def make_rows(width, height):
-    return [[''] * width for _ in range(height)]
-
-
-class Tetris:
-    def __init__(self, width=10, height=16):
-        self.width = width
-        self.height = height
-        self.game_over = False
+class Player:
+    def __init__(self, offset_x):
+        self.offset_x = offset_x
+        self.grid = create_grid()
+        self.piece = random_piece()
         self.score = 0
-        self._random_shapes = random_shape_bag()
+        self.game_over = False
 
-        self.field = make_rows(width, height)
-        self.piece = self._get_next_piece()
-
-    def _get_next_piece(self):
-        shape = next(self._random_shapes)
-        centered = self.width // 2 - 2
-        top = self.height - 1
-        return Piece(shape, x=centered, y=top)
-
-    def _place_new_piece(self):
-        self.piece = self._get_next_piece()
-        if not piece_fits(self.field, self.piece):
+    def spawn(self):
+        self.piece = random_piece()
+        if check_collision(self.grid, self.piece):
             self.game_over = True
 
-    def _freeze_piece(self):
-        for x, y in get_piece_blocks(self.piece):
-            self.field[y][x] = self.piece.shape
+    def move(self, dx):
+        self.piece['x'] += dx
+        if check_collision(self.grid, self.piece):
+            self.piece['x'] -= dx
 
-    def _remove_full_rows(self):
-        self.field = [row for row in self.field if not all(row)]
-        num_rows_cleared = self.height - len(self.field)
-        self.score += num_rows_cleared
-        self.field += make_rows(self.width, num_rows_cleared)
+    def rotate(self):
+        old_shape = self.piece['shape']
+        rotate(self.piece)
+        if check_collision(self.grid, self.piece):
+            for dx in [-1, 1, -2, 2]:
+                self.piece['x'] += dx
+                if not check_collision(self.grid, self.piece):
+                    return
+                self.piece['x'] -= dx
+            self.piece['shape'] = old_shape
 
-    def _move(self, *, rot=0, dx=0, dy=0):
-        if rot:
-            candidate_pieces = get_wall_kicks(self.piece, rot=rot)
-        else:
-            candidate_pieces = [move_piece(self.piece, dx=dx, dy=dy)]
-
-        for piece in candidate_pieces:
-            if piece_fits(self.field, piece):
-                self.piece = piece
-                return
-
-        tried_to_move_down = dy == -1
-        if tried_to_move_down:
-            self._freeze_piece()
-            self._remove_full_rows()
-            self._place_new_piece()
-
-    def move(self, movement):
-        if not self.game_over:
-            args = {
-                'left': {'dx': -1},
-                'right': {'dx': 1},
-                'down': {'dy': -1},
-                'rotleft': {'rot': -1},
-                'rotright': {'rot': 1},
-            }[movement]
-            self._move(**args)
-
-
-# Colors from Flatris.
-colors = {
-    'I': '#3cc7d6',  # Cyan.
-    'O': '#fbb414',  # Yellow.
-    'T': '#b04497',  # Magenta.
-    'J': '#3993d0',  # Blue.
-    'L': '#ed652f',  # Orange.
-    'S': '#95c43d',  # Green.
-    'Z': '#e84138',  # Red.
-    '':  '#ecf0f1',  # (Background color.)
-}
-
-
-class BlockDisplay(tkinter.Canvas):
-    def __init__(self, parent, width, height, block_size=40):
-        tkinter.Canvas.__init__(self, parent,
-                                width=width * block_size,
-                                height=height * block_size)
-        self.block_size = block_size
-        self.width = width
-        self.height = height
-        self.color_mode = True
-        self.blocks = {
-            (x, y): self._create_block(x, y)
-            for x in range(width)
-            for y in range(height)
-        }
-
-    def _create_block(self, x, y):
-        flipped_y = self.height - y - 1
-        y = flipped_y
-        size = self.block_size
-        return self.create_rectangle(
-            x * size,
-            y * size,
-            (x + 1) * size,
-            (y + 1) * size,
-            fill='',
-            outline='',
-        )
-
-    def __setitem__(self, pos, char):
-        if self.color_mode:
-            fill = colors[char.upper()]
-        else:
-            if char == '':
-                fill = colors['']
-            elif char.isupper():
-                fill = 'gray50'
+    def drop(self, opponent):
+        self.piece['y'] += 1
+        if check_collision(self.grid, self.piece):
+            self.piece['y'] -= 1
+            if self.piece['y'] <= 0:
+                self.game_over = True
             else:
-                fill = 'black'
+                lock_piece(self.grid, self.piece)
+                self.score += clear_lines(self.grid, opponent)
+                self.spawn()
 
-        block = self.blocks[pos]
-        self.itemconfigure(block, fill=fill)
+def draw_text(text, center_x, center_y, size=48, colour=(255,255,255)):
+    f = pygame.font.SysFont("Arial", size)
+    surf = f.render(text, True, colour)
+    rect = surf.get_rect(center=(center_x, center_y))
+    screen.blit(surf, rect)
 
-    def clear(self):
-        self.itemconfigure('all', fill='')
+def countdown(seconds=3):
+    for i in range(seconds, 0, -1):
+        screen.fill((0,0,0))
+        draw_text(f"{i}", screen.get_width()//2, screen.get_height()//2)
+        pygame.display.flip()
+        time.sleep(1)
 
-    def pause(self):
-        self.itemconfigure('all', stipple='gray50')
+def select_game_time():
+    options = {
+        pygame.K_1: 30,
+        pygame.K_2: 60,
+        pygame.K_3: 90,
+        pygame.K_4: 120,
+        pygame.K_5: 180
+    }
+    while True:
+        screen.fill((10, 10, 10))
+        draw_text("Select Game Duration", screen.get_width() // 2, 100, size=36)
+        draw_text("1: 30s   2: 60s   3: 90s   4: 120s   5: 180s", screen.get_width() // 2, 180, size=28)
+        draw_text("Press a number key to begin", screen.get_width() // 2, 250, size=24)
+        pygame.display.flip()
 
-    def resume(self):
-        self.itemconfigure('all', stipple='')
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); exit()
+            elif event.type == pygame.KEYDOWN and event.key in options:
+                return options[event.key]
 
+def game_loop():
+    game_duration = select_game_time()
+    clock = pygame.time.Clock()
+    p1 = Player(0)
+    p2 = Player(WIDTH + GAP)
+    start_time = time.time()
+    game_over = False
+    last_gravity_time = pygame.time.get_ticks()
 
-class TetrisTk:
-    def __init__(self):
+    countdown(3)
 
-        self.tk = tk = tkinter.Tk()
-        self.tk.title('Tetris - Two Player')
+    while True:
+        screen.fill((20, 20, 20))
+        elapsed = int(time.time() - start_time)
+        remaining = max(0, game_duration - elapsed)
 
-        # Player 1 setup
-        self.tetris1 = Tetris()
-        self.display1 = BlockDisplay(tk, self.tetris1.width, self.tetris1.height)
-        self.display1.pack(side=tkinter.LEFT, fill=tkinter.X)
+        if (remaining == 0 or (p1.game_over and p2.game_over)) and not game_over:
+            game_over = True
+            winner = "Draw"
+            if p1.score > p2.score: winner = "Player 1 Wins!"
+            elif p2.score > p1.score: winner = "Player 2 Wins!"
 
-        # Player 2 setup
-        self.tetris2 = Tetris()
-        self.display2 = BlockDisplay(tk, self.tetris2.width, self.tetris2.height)
-        self.display2.pack(side=tkinter.RIGHT, fill=tkinter.X)
+        if game_over:
+            screen.fill((20, 20, 20))
+            draw_text("Game Over", screen.get_width()//2, HEIGHT//2 - 80)
+            draw_text(winner, screen.get_width()//2, HEIGHT//2 - 40, size=36)
+            draw_text(f"Player 1 Score: {p1.score}", screen.get_width()//2, HEIGHT//2, size=24)
+            draw_text(f"Player 2 Score: {p2.score}", screen.get_width()//2, HEIGHT//2 + 30, size=24)
+            draw_text("Press R to restart", screen.get_width()//2, HEIGHT//2 + 70, size=24)
 
-        # Player 1 score
-        self.score_view1 = tkinter.Label(self.tk, text='Player 1 Score: 0')
-        self.score_view1.pack(side=tkinter.LEFT, fill=tkinter.X)
-        self.score_view1['font'] = 'Helvetica 20'
+        if not game_over:
+            draw_grid(p1.grid, p1.offset_x)
+            draw_grid(p2.grid, p2.offset_x)
+            if not p1.game_over: draw_piece(p1.piece, p1.offset_x)
+            if not p2.game_over: draw_piece(p2.piece, p2.offset_x)
 
-        # Player 2 score
-        self.score_view2 = tkinter.Label(self.tk, text='Player 2 Score: 0')
-        self.score_view2.pack(side=tkinter.RIGHT, fill=tkinter.X)
-        self.score_view2['font'] = 'Helvetica 20'
+            draw_text(f"P1: {p1.score}", p1.offset_x + WIDTH//2, HEIGHT + 20, size=20)
+            draw_text(f"P2: {p2.score}", p2.offset_x + WIDTH//2, HEIGHT + 20, size=20)
+            draw_text(f"Time Left: {remaining}s", screen.get_width()//2, HEIGHT + 50, size=24)
 
-        # Bind keys for both players
-        tk.bind('<KeyPress>', self.keypress)
+        pygame.display.flip()
+        clock.tick(FPS)
 
-        self.paused = True
-        self.fall_id = None
-        self.redraw()
-        self.resume()
+        now = pygame.time.get_ticks()
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); exit()
+            elif event.type == pygame.KEYDOWN:
+                if game_over and event.key == pygame.K_r:
+                    return game_loop()
+                if not game_over:
+                    if event.key == pygame.K_a: p1.move(-1)
+                    elif event.key == pygame.K_d: p1.move(1)
+                    elif event.key == pygame.K_w: p1.rotate()
+                    elif event.key == pygame.K_s: p1.drop(p2)
+                    elif event.key == pygame.K_LEFT: p2.move(-1)
+                    elif event.key == pygame.K_RIGHT: p2.move(1)
+                    elif event.key == pygame.K_UP: p2.rotate()
+                    elif event.key == pygame.K_DOWN: p2.drop(p1)
 
-        tk.mainloop()
+        if not game_over and now - last_gravity_time > GRAVITY_DELAY:
+            if not p1.game_over:
+                p1.drop(p2)
+            if not p2.game_over:
+                p2.drop(p1)
+            last_gravity_time = now
 
-    def fall(self):
-        self.tetris1.move('down')
-        self.tetris2.move('down')
-        self.redraw()
-        if self.tetris1.game_over or self.tetris2.game_over:
-            self.pause()
-        else:
-            self.schedule_fall()
-
-    def schedule_fall(self):
-        # In case we're already called once.
-        self.cancel_fall()
-        self.fall_id = self.tk.after(500, self.fall)
-
-    def cancel_fall(self):
-        if self.fall_id is not None:
-            self.tk.after_cancel(self.fall_id)
-            self.fall_id = None
-
-    def _draw_field(self, tetris, display):
-        for y, row in enumerate(tetris.field):
-            for x, char in enumerate(row):
-                display[x, y] = char
-
-    def _draw_piece(self, tetris, display):
-        piece = tetris.piece
-        char = piece.shape.lower()
-        for x, y in get_piece_blocks(piece):
-            display[x, y] = char
-
-    def redraw(self):
-        # Player 1
-        self._draw_field(self.tetris1, self.display1)
-        if not self.tetris1.game_over:
-            self._draw_piece(self.tetris1, self.display1)
-        self.score_view1['text'] = f'Player 1 Score: {self.tetris1.score}'
-
-        # Player 2
-        self._draw_field(self.tetris2, self.display2)
-        if not self.tetris2.game_over:
-            self._draw_piece(self.tetris2, self.display2)
-        self.score_view2['text'] = f'Player 2 Score: {self.tetris2.score}'
-
-    def pause(self):
-        if not self.paused:
-            self.display1.pause()
-            self.display2.pause()
-            self.cancel_fall()
-            self.paused = True
-
-    def resume(self):
-        if self.paused:
-            self.display1.resume()
-            self.display2.resume()
-            self.schedule_fall()
-            self.paused = False
-
-    def new_game(self):
-        self.tetris1 = Tetris()
-        self.tetris2 = Tetris()
-        self.display1.resume()
-        self.display2.resume()
-        self.resume()
-
-    def toggle_pause(self):
-        if self.tetris1.game_over or self.tetris2.game_over:
-            self.new_game()
-        elif self.paused:
-            self.resume()
-        else:
-            self.pause()
-
-    def keypress(self, event):
-        commands1 = {
-            'w': lambda: self.tetris1.move('rotleft'),
-            'a': lambda: self.tetris1.move('left'),
-            'd': lambda: self.tetris1.move('right'),
-            's': lambda: self.tetris1.move('down'),
-        }
-        commands2 = {
-            'Up': lambda: self.tetris2.move('rotleft'),
-            'Left': lambda: self.tetris2.move('left'),
-            'Right': lambda: self.tetris2.move('right'),
-            'Down': lambda: self.tetris2.move('down'),
-        }
-
-
-
-        if not self.paused:
-            if event.keysym in commands1:
-                commands1[event.keysym]()
-                self.redraw()
-            elif event.keysym in commands2:
-                commands2[event.keysym]()
-                self.redraw()
-
-
-if __name__ == '__main__':
-    TetrisTk()
+if __name__ == "__main__":
+    game_loop()
