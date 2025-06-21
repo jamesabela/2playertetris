@@ -15,7 +15,8 @@ EXTRA_HEIGHT = 80
 FPS = 5
 GRAVITY_DELAY = 1000  # milliseconds
 
-screen = pygame.display.set_mode((WIDTH * 2 + GAP, HEIGHT + EXTRA_HEIGHT))
+window_size = (WIDTH * 2 + GAP, HEIGHT + EXTRA_HEIGHT)
+screen = pygame.display.set_mode(window_size, pygame.RESIZABLE)
 pygame.display.set_caption("2 Player Tetris")
 font = pygame.font.SysFont("Arial", 28)
 
@@ -40,32 +41,60 @@ colors = {
     'X': (100, 100, 100),
 }
 
+class BagQueue:
+    def __init__(self):
+        self.queue = []
+
+    def refill(self):
+        bag = list(shapes.keys())
+        random.shuffle(bag)
+        self.queue.extend(bag)
+
+    def next(self):
+        if not self.queue:
+            self.refill()
+        return self.queue.pop(0)
+
+bag_queue = BagQueue()
+
 def random_piece():
-    type_ = random.choice(list(shapes.keys()))
+    type_ = bag_queue.next()
     return {'type': type_, 'shape': shapes[type_], 'x': 3, 'y': 0}
 
 def create_grid():
     return [[''] * COLS for _ in range(ROWS)]
 
-def draw_grid(grid, offset_x):
+def draw_grid(grid, offset_x, offset_y=None, scale=1.0):
+    if offset_y is None:
+        offset_x += (screen.get_width() - (WIDTH * 2 + GAP)) // 2
+        offset_y = (screen.get_height() - (HEIGHT + EXTRA_HEIGHT)) // 2
     for y in range(ROWS):
         for x in range(COLS):
             color = colors.get(grid[y][x], (30, 30, 30))
-            pygame.draw.rect(screen, color,
-                (x * BLOCK_SIZE + offset_x, y * BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE))
-            pygame.draw.rect(screen, (0, 0, 0),
-                (x * BLOCK_SIZE + offset_x, y * BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE), 1)
+            rect = pygame.Rect(
+                offset_x + x * BLOCK_SIZE * scale,
+                offset_y + y * BLOCK_SIZE * scale,
+                BLOCK_SIZE * scale,
+                BLOCK_SIZE * scale
+            )
+            pygame.draw.rect(screen, color, rect)
+            pygame.draw.rect(screen, (0, 0, 0), rect, 1)
 
-def draw_piece(piece, offset_x):
+def draw_piece(piece, offset_x, offset_y=None, scale=1.0):
+    if offset_y is None:
+        offset_x += (screen.get_width() - (WIDTH * 2 + GAP)) // 2
+        offset_y = (screen.get_height() - (HEIGHT + EXTRA_HEIGHT)) // 2
     for y, row in enumerate(piece['shape']):
         for x, cell in enumerate(row):
             if cell:
-                pygame.draw.rect(screen, colors[piece['type']],
-                    ((piece['x'] + x) * BLOCK_SIZE + offset_x, (piece['y'] + y) * BLOCK_SIZE,
-                     BLOCK_SIZE, BLOCK_SIZE))
-                pygame.draw.rect(screen, (0, 0, 0),
-                    ((piece['x'] + x) * BLOCK_SIZE + offset_x, (piece['y'] + y) * BLOCK_SIZE,
-                     BLOCK_SIZE, BLOCK_SIZE), 1)
+                rect = pygame.Rect(
+                    offset_x + (piece['x'] + x) * BLOCK_SIZE * scale,
+                    offset_y + (piece['y'] + y) * BLOCK_SIZE * scale,
+                    BLOCK_SIZE * scale,
+                    BLOCK_SIZE * scale
+                )
+                pygame.draw.rect(screen, colors[piece['type']], rect)
+                pygame.draw.rect(screen, (0, 0, 0), rect, 1)
 
 def check_collision(grid, piece):
     for y, row in enumerate(piece['shape']):
@@ -113,7 +142,6 @@ def clear_lines(grid, opponent):
         add_garbage_lines(opponent.grid, cleared)
     return cleared
 
-
 class Player:
     def __init__(self, offset_x):
         self.offset_x = offset_x
@@ -145,7 +173,7 @@ class Player:
 
     def drop(self, opponent):
         self.piece['y'] += 1
-        self.score += 1  # +1 point for gravity or manual drop
+        self.score += 1
         if check_collision(self.grid, self.piece):
             self.piece['y'] -= 1
             if self.piece['y'] <= 0:
@@ -153,15 +181,37 @@ class Player:
             else:
                 lock_piece(self.grid, self.piece)
                 cleared = clear_lines(self.grid, opponent)
-                if cleared == 1:
-                    self.score += 100
-                elif cleared == 2:
-                    self.score += 300
-                elif cleared == 3:
-                    self.score += 500
-                elif cleared == 4:
-                    self.score += 800
+                self.score += [0, 100, 300, 500, 800][cleared]
                 self.spawn()
+
+    def hard_drop(self, opponent):
+        while not check_collision(self.grid, self.piece):
+            self.piece['y'] += 1
+            self.score += 1
+        self.piece['y'] -= 1
+        lock_piece(self.grid, self.piece)
+        cleared = clear_lines(self.grid, opponent)
+        self.score += [0, 100, 300, 500, 800][cleared]
+        self.spawn()
+
+class DemoPlayer(Player):
+    def __init__(self, offset_x):
+        super().__init__(offset_x)
+        self.drop_timer = pygame.time.get_ticks()
+
+    def auto_play(self):
+        # Try a move or rotation randomly
+        if random.random() < 0.05:
+            self.rotate()
+        elif random.random() < 0.5:
+            self.move(random.choice([-1, 1]))
+
+        # Simulate gravity drop every 500ms
+        now = pygame.time.get_ticks()
+        if now - self.drop_timer > 500:
+            self.drop(self)  # Drop onto itself – no garbage lines in demo
+            self.drop_timer = now
+
 
 def draw_text(text, center_x, center_y, size=48, colour=(255,255,255)):
     f = pygame.font.SysFont("Arial", size)
@@ -176,70 +226,84 @@ def countdown(seconds=3):
         pygame.display.flip()
         time.sleep(1)
 
-def select_game_time():
-    options = {
-        pygame.K_1: 30,
-        pygame.K_2: 60,
-        pygame.K_3: 90,
-        pygame.K_4: 120,
-        pygame.K_5: 180
-    }
-    while True:
-        screen.fill((10, 10, 10))
-        draw_text("Select Game Duration", screen.get_width() // 2, 100, size=36)
-        draw_text("1: 30s   2: 60s   3: 90s   4: 120s   5: 180s", screen.get_width() // 2, 180, size=28)
-        draw_text("Press a number key to begin", screen.get_width() // 2, 250, size=24)
-        pygame.display.flip()
-
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit(); exit()
-            elif event.type == pygame.KEYDOWN and event.key in options:
-                return options[event.key]
-
 def game_loop():
     clock = pygame.time.Clock()
 
-    # === Instruction screen before the game starts ===
+    # === Menu ===
     selected_time = None
+    demo_p1 = DemoPlayer(0)
+    demo_p2 = DemoPlayer(WIDTH + GAP)
+    last_demo_update = pygame.time.get_ticks()
+
     while selected_time is None:
         screen.fill((10, 10, 10))
-        draw_text("2-Player Tetris", screen.get_width()//2, 40, size=36)
-        draw_text("Press 1–5 to select game time", screen.get_width()//2, 90, size=24)
-        draw_text("1 = 30s   2 = 60s   3 = 90s   4 = 120s   5 = 180s", screen.get_width()//2, 120, size=20)
+        draw_text("2-Player Tetris", screen.get_width() // 2, 40, size=36)
+        draw_text("Press 1–5 to select game time", screen.get_width() // 2, 90, size=24)
+        draw_text("1 = 30s   2 = 60s   3 = 90s   4 = 120s   5 = 180s", screen.get_width() // 2, 120, size=20)
+        draw_text("Player 1: A/D = Move, W = Rotate, S = Drop", screen.get_width() // 2, 170, size=20)
+        draw_text("Player 2: ←/→ = Move, ↑ = Rotate, ↓ = Drop", screen.get_width() // 2, 200, size=20)
+        draw_text("Tap Drop = soft drop, Hold = hard drop", screen.get_width() // 2, 230, size=20)
+        demo_scale = 0.5
+        demo_height = int(ROWS * BLOCK_SIZE * demo_scale)
+        demo_offset_y = screen.get_height() - demo_height - 10
 
-        draw_text("Player 1: A = Left, D = Right, W = Rotate, S = Drop", screen.get_width()//2, 170, size=20)
-        draw_text("Player 2: ← = Left, → = Right, ↑ = Rotate, ↓ = Drop", screen.get_width()//2, 200, size=20)
+        draw_text("Press 1–5 to begin", screen.get_width() // 2, demo_offset_y - 30, size=24)
 
-        draw_text("Rules:", screen.get_width()//2, 250, size=24)
-        draw_text("- Clear 2+ lines to send garbage to your opponent", screen.get_width()//2, 280, size=18)
-        draw_text("- Score: 100 (1 line), 300 (2), 500 (3), 800 (4)", screen.get_width()//2, 305, size=18)
-        draw_text("- +1 point per block dropped", screen.get_width()//2, 330, size=18)
-        draw_text("- Highest score at end wins", screen.get_width()//2, 355, size=18)
+        # Run and draw demo players in a small window at the bottom
+        demo_p1.auto_play()
+        demo_p2.auto_play()
 
-        draw_text("Press 1 to 5 to begin", screen.get_width()//2, screen.get_height() - 40, size=24)
+        demo_scale = 0.5
+        demo_offset_y = screen.get_height() - int(ROWS * BLOCK_SIZE * demo_scale) - 10
+        demo_offset_x1 = screen.get_width() // 2 - int((COLS * BLOCK_SIZE * demo_scale) + GAP // 2)
+        demo_offset_x2 = screen.get_width() // 2 + GAP // 2
+
+        draw_grid(demo_p1.grid, demo_offset_x1, demo_offset_y, demo_scale)
+        draw_grid(demo_p2.grid, demo_offset_x2, demo_offset_y, demo_scale)
+        if not demo_p1.game_over:
+            draw_piece(demo_p1.piece, demo_offset_x1, demo_offset_y, demo_scale)
+        if not demo_p2.game_over:
+            draw_piece(demo_p2.piece, demo_offset_x2, demo_offset_y, demo_scale)
+
         pygame.display.flip()
+        pygame.time.delay(30)
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit();
+                exit()
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_1:
+                    selected_time = 30
+                elif event.key == pygame.K_2:
+                    selected_time = 60
+                elif event.key == pygame.K_3:
+                    selected_time = 90
+                elif event.key == pygame.K_4:
+                    selected_time = 120
+                elif event.key == pygame.K_5:
+                    selected_time = 180
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit(); exit()
-            if event.type == pygame.KEYDOWN:
+            elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_1: selected_time = 30
                 elif event.key == pygame.K_2: selected_time = 60
                 elif event.key == pygame.K_3: selected_time = 90
                 elif event.key == pygame.K_4: selected_time = 120
                 elif event.key == pygame.K_5: selected_time = 180
 
-    # === Game setup starts here ===
     p1 = Player(0)
     p2 = Player(WIDTH + GAP)
     start_time = time.time()
     game_over = False
     last_gravity_time = pygame.time.get_ticks()
     game_duration = selected_time
-
     countdown(3)
 
+    down_keys = {pygame.K_s: None, pygame.K_DOWN: None}
+    HOLD_THRESHOLD = 300
 
     while True:
         screen.fill((20, 20, 20))
@@ -253,7 +317,6 @@ def game_loop():
             elif p2.score > p1.score: winner = "Player 2 Wins!"
 
         if game_over:
-            screen.fill((20, 20, 20))
             draw_text("Game Over", screen.get_width()//2, HEIGHT//2 - 80)
             draw_text(winner, screen.get_width()//2, HEIGHT//2 - 40, size=36)
             draw_text(f"Player 1 Score: {p1.score}", screen.get_width()//2, HEIGHT//2, size=24)
@@ -266,9 +329,10 @@ def game_loop():
             if not p1.game_over: draw_piece(p1.piece, p1.offset_x)
             if not p2.game_over: draw_piece(p2.piece, p2.offset_x)
 
-            draw_text(f"P1: {p1.score}", p1.offset_x + WIDTH//2, HEIGHT + 20, size=20)
-            draw_text(f"P2: {p2.score}", p2.offset_x + WIDTH//2, HEIGHT + 20, size=20)
-            draw_text(f"Time Left: {remaining}s", screen.get_width()//2, HEIGHT + 50, size=24)
+            text_offset_y = (screen.get_height() - (HEIGHT + EXTRA_HEIGHT)) // 2 + HEIGHT + 20
+            draw_text(f"P1: {p1.score}", p1.offset_x + (screen.get_width() - (WIDTH * 2 + GAP)) // 2 + WIDTH//2, text_offset_y, size=20)
+            draw_text(f"P2: {p2.score}", p2.offset_x + (screen.get_width() - (WIDTH * 2 + GAP)) // 2 + WIDTH//2, text_offset_y, size=20)
+            draw_text(f"Time Left: {remaining}s", screen.get_width()//2, text_offset_y + 30, size=24)
 
         pygame.display.flip()
         clock.tick(FPS)
@@ -284,11 +348,28 @@ def game_loop():
                     if event.key == pygame.K_a: p1.move(-1)
                     elif event.key == pygame.K_d: p1.move(1)
                     elif event.key == pygame.K_w: p1.rotate()
-                    elif event.key == pygame.K_s: p1.drop(p2)
+                    elif event.key == pygame.K_s: down_keys[pygame.K_s] = pygame.time.get_ticks()
                     elif event.key == pygame.K_LEFT: p2.move(-1)
                     elif event.key == pygame.K_RIGHT: p2.move(1)
                     elif event.key == pygame.K_UP: p2.rotate()
-                    elif event.key == pygame.K_DOWN: p2.drop(p1)
+                    elif event.key == pygame.K_DOWN: down_keys[pygame.K_DOWN] = pygame.time.get_ticks()
+            elif event.type == pygame.KEYUP:
+                if event.key == pygame.K_s and down_keys[pygame.K_s] is not None:
+                    if pygame.time.get_ticks() - down_keys[pygame.K_s] < HOLD_THRESHOLD:
+                        p1.drop(p2)
+                    down_keys[pygame.K_s] = None
+                elif event.key == pygame.K_DOWN and down_keys[pygame.K_DOWN] is not None:
+                    if pygame.time.get_ticks() - down_keys[pygame.K_DOWN] < HOLD_THRESHOLD:
+                        p2.drop(p1)
+                    down_keys[pygame.K_DOWN] = None
+
+        for key in down_keys:
+            if down_keys[key] is not None and now - down_keys[key] >= HOLD_THRESHOLD:
+                if key == pygame.K_s and not p1.game_over:
+                    p1.hard_drop(p2)
+                elif key == pygame.K_DOWN and not p2.game_over:
+                    p2.hard_drop(p1)
+                down_keys[key] = None
 
         if not game_over and now - last_gravity_time > GRAVITY_DELAY:
             if not p1.game_over:
